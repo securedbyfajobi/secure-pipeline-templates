@@ -1,0 +1,305 @@
+name: Security Compliance Gates
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  license-compliance:
+    name: License Compliance Check
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: License Audit
+      run: |
+        # Install license checker
+        npm install -g license-checker
+
+        # Generate license report
+        license-checker --json --out licenses.json
+
+        # Check for prohibited licenses
+        PROHIBITED_LICENSES=("GPL-2.0" "GPL-3.0" "AGPL-1.0" "AGPL-3.0")
+
+        for license in "${PROHIBITED_LICENSES[@]}"; do
+          if jq -r '.[] | .licenses' licenses.json | grep -q "$license"; then
+            echo "::error::Prohibited license found: $license"
+            exit 1
+          fi
+        done
+
+        echo "::notice::License compliance check passed"
+
+  security-policy-compliance:
+    name: Security Policy Compliance
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Check Security Policy Files
+      run: |
+        # Required security files
+        REQUIRED_FILES=(
+          "SECURITY.md"
+          ".github/SECURITY.md"
+          "security.txt"
+          ".well-known/security.txt"
+        )
+
+        FOUND=false
+        for file in "${REQUIRED_FILES[@]}"; do
+          if [ -f "$file" ]; then
+            FOUND=true
+            echo "✅ Security policy found: $file"
+            break
+          fi
+        done
+
+        if [ "$FOUND" = false ]; then
+          echo "::error::No security policy file found. Please add SECURITY.md"
+          exit 1
+        fi
+
+    - name: Validate Security Contact
+      run: |
+        if [ -f "SECURITY.md" ]; then
+          if grep -q "security@" SECURITY.md; then
+            echo "✅ Security contact email found"
+          else
+            echo "::warning::No security contact email found in SECURITY.md"
+          fi
+        fi
+
+  gdpr-compliance:
+    name: GDPR Compliance Check
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Data Processing Check
+      run: |
+        # Search for potential PII processing
+        PII_PATTERNS=(
+          "email"
+          "phone"
+          "address"
+          "ssn"
+          "credit.?card"
+          "passport"
+          "driver.?license"
+        )
+
+        PII_FOUND=false
+        for pattern in "${PII_PATTERNS[@]}"; do
+          if grep -r -i "$pattern" --include="*.js" --include="*.py" --include="*.java" . >/dev/null 2>&1; then
+            echo "::warning::Potential PII processing detected for: $pattern"
+            PII_FOUND=true
+          fi
+        done
+
+        if [ "$PII_FOUND" = true ]; then
+          echo "::notice::GDPR compliance review recommended"
+        fi
+
+    - name: Privacy Policy Check
+      run: |
+        PRIVACY_FILES=(
+          "PRIVACY.md"
+          "privacy-policy.md"
+          "PRIVACY_POLICY.md"
+        )
+
+        FOUND=false
+        for file in "${PRIVACY_FILES[@]}"; do
+          if [ -f "$file" ]; then
+            FOUND=true
+            echo "✅ Privacy policy found: $file"
+            break
+          fi
+        done
+
+        if [ "$FOUND" = false ]; then
+          echo "::warning::No privacy policy found. Consider adding if processing personal data"
+        fi
+
+  pci-dss-compliance:
+    name: PCI DSS Compliance Check
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Payment Processing Check
+      run: |
+        # Search for payment-related patterns
+        PAYMENT_PATTERNS=(
+          "credit.?card"
+          "card.?number"
+          "cvv"
+          "card.?expiry"
+          "payment.?processing"
+          "stripe"
+          "paypal"
+          "square"
+        )
+
+        PAYMENT_FOUND=false
+        for pattern in "${PAYMENT_PATTERNS[@]}"; do
+          if grep -r -i "$pattern" --include="*.js" --include="*.py" --include="*.java" . >/dev/null 2>&1; then
+            echo "::warning::Payment processing detected: $pattern"
+            PAYMENT_FOUND=true
+          fi
+        done
+
+        if [ "$PAYMENT_FOUND" = true ]; then
+          echo "::notice::PCI DSS compliance review required"
+
+          # Check for secure coding practices
+          if ! grep -r "encrypt" --include="*.js" --include="*.py" . >/dev/null 2>&1; then
+            echo "::error::No encryption patterns found - PCI DSS requirement"
+          fi
+        fi
+
+  data-retention-compliance:
+    name: Data Retention Compliance
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Database Cleanup Check
+      run: |
+        # Search for data retention policies
+        if grep -r -i "retention\|cleanup\|purge\|delete.old" --include="*.sql" --include="*.js" --include="*.py" . >/dev/null 2>&1; then
+          echo "✅ Data retention mechanisms found"
+        else
+          echo "::warning::No data retention/cleanup mechanisms found"
+        fi
+
+    - name: Backup Policy Check
+      run: |
+        if grep -r -i "backup\|restore" --include="*.md" --include="*.yml" . >/dev/null 2>&1; then
+          echo "✅ Backup policies documented"
+        else
+          echo "::warning::No backup policies found"
+        fi
+
+  accessibility-compliance:
+    name: Accessibility Compliance (WCAG)
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: HTML Accessibility Check
+      if: hashFiles('**/*.html', '**/*.jsx', '**/*.vue') != ''
+      run: |
+        npm install -g axe-core @axe-core/cli
+
+        # Basic accessibility audit
+        if find . -name "*.html" | head -1 | read; then
+          axe $(find . -name "*.html" | head -5) --format json --output axe-report.json || true
+
+          if [ -f axe-report.json ]; then
+            VIOLATIONS=$(jq '.violations | length' axe-report.json)
+            if [ "$VIOLATIONS" -gt 0 ]; then
+              echo "::warning::Accessibility violations found: $VIOLATIONS"
+            else
+              echo "✅ No accessibility violations detected"
+            fi
+          fi
+        fi
+
+  security-headers-compliance:
+    name: Security Headers Check
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Security Headers Configuration
+      run: |
+        # Check for security headers configuration
+        SECURITY_HEADERS=(
+          "Content-Security-Policy"
+          "X-Frame-Options"
+          "X-Content-Type-Options"
+          "Strict-Transport-Security"
+          "X-XSS-Protection"
+          "Referrer-Policy"
+        )
+
+        HEADERS_FOUND=0
+        for header in "${SECURITY_HEADERS[@]}"; do
+          if grep -r -i "$header" --include="*.js" --include="*.py" --include="*.java" --include="*.conf" . >/dev/null 2>&1; then
+            echo "✅ Security header configured: $header"
+            ((HEADERS_FOUND++))
+          else
+            echo "::warning::Security header missing: $header"
+          fi
+        done
+
+        if [ $HEADERS_FOUND -lt 4 ]; then
+          echo "::error::Insufficient security headers configured ($HEADERS_FOUND/6)"
+          exit 1
+        fi
+
+  compliance-summary:
+    name: Compliance Summary
+    runs-on: ubuntu-latest
+    needs: [license-compliance, security-policy-compliance, gdpr-compliance, pci-dss-compliance, data-retention-compliance, accessibility-compliance, security-headers-compliance]
+    if: always()
+
+    steps:
+    - name: Generate Compliance Report
+      run: |
+        cat > compliance-report.md << 'EOF'
+        # Compliance Check Summary
+
+        ## Gate Results
+        - **License Compliance**: ${{ needs.license-compliance.result }}
+        - **Security Policy**: ${{ needs.security-policy-compliance.result }}
+        - **GDPR Compliance**: ${{ needs.gdpr-compliance.result }}
+        - **PCI DSS Check**: ${{ needs.pci-dss-compliance.result }}
+        - **Data Retention**: ${{ needs.data-retention-compliance.result }}
+        - **Accessibility (WCAG)**: ${{ needs.accessibility-compliance.result }}
+        - **Security Headers**: ${{ needs.security-headers-compliance.result }}
+
+        ## Overall Status
+        All compliance gates must pass for production deployment.
+
+        ## Next Steps
+        Review any failed or warning states above and implement necessary fixes.
+
+        Generated: $(date)
+        EOF
+
+    - name: Upload Compliance Report
+      uses: actions/upload-artifact@v3
+      with:
+        name: compliance-report
+        path: compliance-report.md
+
+    - name: Compliance Gate Decision
+      run: |
+        if [[ "${{ needs.license-compliance.result }}" != "success" ]] || \
+           [[ "${{ needs.security-headers-compliance.result }}" != "success" ]]; then
+          echo "::error::Critical compliance gates failed"
+          exit 1
+        fi
+
+        echo "::notice::Compliance gates passed"

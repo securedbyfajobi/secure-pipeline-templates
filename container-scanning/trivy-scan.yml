@@ -1,0 +1,118 @@
+name: Container Security Scanning
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  container-scan:
+    name: Container Security Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Build Docker image
+      run: |
+        docker build -t test-image:${{ github.sha }} .
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'test-image:${{ github.sha }}'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: Run Trivy in table format
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'test-image:${{ github.sha }}'
+        format: 'table'
+        exit-code: '1'
+        ignore-unfixed: true
+        vuln-type: 'os,library'
+        severity: 'CRITICAL,HIGH'
+
+    - name: Docker Scout CVE scanning
+      uses: docker/scout-action@v1
+      with:
+        command: cves
+        image: test-image:${{ github.sha }}
+        sarif-file: scout-results.sarif
+        summary: true
+
+    - name: Scan for secrets in container
+      run: |
+        # Install truffleHog
+        curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+
+        # Extract filesystem from image
+        docker save test-image:${{ github.sha }} | tar -x
+
+        # Scan extracted filesystem
+        trufflehog filesystem . --json > container-secrets.json
+
+        # Check if secrets found
+        if [ -s container-secrets.json ]; then
+          echo "::error::Secrets detected in container image!"
+          cat container-secrets.json
+          exit 1
+        fi
+
+    - name: Check image configuration
+      run: |
+        # Inspect image for security issues
+        docker inspect test-image:${{ github.sha }} > image-config.json
+
+        # Check if running as root
+        USER_ID=$(jq -r '.[0].Config.User' image-config.json)
+        if [ "$USER_ID" = "null" ] || [ "$USER_ID" = "" ] || [ "$USER_ID" = "0" ]; then
+          echo "::warning::Container image may run as root user"
+        fi
+
+        # Check for privileged mode indicators
+        if jq -r '.[0].Config.Env[]?' image-config.json | grep -i privileged; then
+          echo "::warning::Privileged environment variables detected"
+        fi
+
+    - name: Generate security report
+      run: |
+        cat > container-security-report.md << 'EOF'
+        # Container Security Scan Report
+
+        **Image**: test-image:${{ github.sha }}
+        **Date**: $(date)
+        **Commit**: ${{ github.sha }}
+
+        ## Vulnerability Summary
+
+        See detailed results in the Security tab.
+
+        ## Recommendations
+
+        1. Update base image to latest version
+        2. Remove unnecessary packages
+        3. Run as non-root user
+        4. Use minimal base images (distroless, alpine)
+        5. Implement multi-stage builds
+
+        EOF
+
+    - name: Upload security report
+      uses: actions/upload-artifact@v3
+      with:
+        name: container-security-report
+        path: |
+          container-security-report.md
+          trivy-results.sarif
+          scout-results.sarif
+          container-secrets.json
